@@ -313,7 +313,7 @@ class WishlistManager(commands.Cog):
 
             image_path = self._generate_calendar_image(mois, annee, events)
             await interaction.followup.send(
-                "Voici les sorties du mois !",
+                "Voici les sorties du mois de ta wishlist !",
                 file=discord.File(image_path, filename="calendar.png"),
             )
         except Exception as e:
