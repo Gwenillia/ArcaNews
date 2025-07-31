@@ -1,11 +1,15 @@
 import os
 import logging
+import calendar
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from datetime import datetime
 import aiosqlite
 import discord
 from discord import app_commands, Interaction
 from discord.ext import commands
 from typing import List, Dict, Any, Optional
-from datetime import datetime
 from ui_components import GameEmbedView, EnhancedPaginatorView
 from discord.ui import View, Button
 
@@ -173,6 +177,61 @@ class WishlistManager(commands.Cog):
             embed.set_image(url=cover_url)
         return embed
 
+    def _generate_calendar_image(self, month: int, year: int, events: Dict[int, List[str]]) -> str:
+        """Generate a PNG calendar highlighting release events."""
+        cal = calendar.Calendar(firstweekday=0)
+        month_matrix = cal.monthdayscalendar(year, month)
+
+        # Build the text and color matrix for the table
+        table_text: List[List[str]] = []
+        cell_colors: List[List[str]] = []
+        for week in month_matrix:
+            row_text = []
+            row_colors = []
+            for idx, day in enumerate(week):
+                if day == 0:
+                    row_text.append("")
+                    row_colors.append("#FFFFFF")
+                    continue
+
+                lines = [str(day)]
+                if day in events:
+                    for name in events[day][:3]:
+                        line = name[:20] + ("..." if len(name) > 20 else "")
+                        lines.append(line)
+                row_text.append("\n".join(lines))
+                row_colors.append("#F0F0F0" if idx >= 5 else "#FFFFFF")
+
+            table_text.append(row_text)
+            cell_colors.append(row_colors)
+
+        fig, ax = plt.subplots(figsize=(10, 1 + len(month_matrix) * 1.5))
+        ax.set_axis_off()
+
+        table = ax.table(
+            cellText=table_text,
+            cellColours=cell_colors,
+            colLabels=["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"],
+            cellLoc="left",
+            loc="center",
+        )
+
+        table.auto_set_font_size(False)
+        table.set_fontsize(10)
+
+        # Adjust cell dimensions for readability
+        for (row, col), cell in table.get_celld().items():
+            cell.set_height(0.15)
+            cell.set_width(0.14)
+
+        month_name = calendar.month_name[month]
+        ax.set_title(f"{month_name} {year}", fontsize=16, pad=20)
+
+        output_path = "/tmp/calendar.png"
+        plt.savefig(output_path, bbox_inches="tight")
+        plt.close(fig)
+        return output_path
+
     @app_commands.command(name="wishlist", description="💝 Affiche votre wishlist de jeux")
     async def wishlist_command(self, interaction: Interaction):
         await interaction.response.defer()
@@ -219,6 +278,47 @@ class WishlistManager(commands.Cog):
         except Exception as e:
             logger.error(f"Error clearing wishlist: {e}")
             await interaction.followup.send("❌ Une erreur s'est produite.")
+
+    @app_commands.command(name="calendar", description="🗓️ Affiche les sorties de votre wishlist pour un mois donné")
+    @app_commands.describe(mois="Mois (1-12)", annee="Année")
+    async def calendar_command(self, interaction: Interaction, mois: int, annee: int):
+        await interaction.response.defer()
+        if mois < 1 or mois > 12:
+            await interaction.followup.send("❌ Mois invalide. Utilisez un nombre entre 1 et 12.")
+            return
+
+        try:
+            start = datetime(annee, mois, 1)
+            if mois == 12:
+                end = datetime(annee + 1, 1, 1)
+            else:
+                end = datetime(annee, mois + 1, 1)
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute(
+                    "SELECT name, first_release_date FROM wishlists WHERE user_id = ? AND first_release_date >= ? AND first_release_date < ?",
+                    (interaction.user.id, int(start.timestamp()), int(end.timestamp())),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+
+            events: Dict[int, List[str]] = {}
+            for name, ts in rows:
+                try:
+                    day = datetime.fromtimestamp(ts).day
+                except (ValueError, OSError):
+                    continue
+                events.setdefault(day, [])
+                if name not in events[day]:
+                    events[day].append(name)
+
+            image_path = self._generate_calendar_image(mois, annee, events)
+            await interaction.followup.send(
+                "Voici les sorties du mois !",
+                file=discord.File(image_path, filename="calendar.png"),
+            )
+        except Exception as e:
+            logger.error(f"Error generating calendar: {e}")
+            await interaction.followup.send("❌ Une erreur s'est produite lors de la génération du calendrier.")
 
 class ClearWishlistView(View):
     """Confirmation view to clear the entire wishlist."""
