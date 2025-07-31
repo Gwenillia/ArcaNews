@@ -24,9 +24,7 @@ async def on_ready():
     logger.info("📡 Lancement de la boucle Miniflux...")
 
     try:
-        dev_guild = discord.Object(id=DEV_GUILD_ID)
-        bot.tree.copy_global_to(guild=dev_guild)
-        synced = await bot.tree.sync(guild=dev_guild)
+        synced = await bot.tree.sync()
         logger.info(f"🌐 Synced {len(synced)} slash command(s)")
     except Exception as e:
         logger.error(f"❌ Failed to sync commands: {e}")
