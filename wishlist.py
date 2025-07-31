@@ -7,6 +7,7 @@ from discord.ext import commands
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from ui_components import GameEmbedView, EnhancedPaginatorView
+from discord.ui import View, Button
 
 logger = logging.getLogger(__name__)
 
@@ -49,20 +50,30 @@ class WishlistManager(commands.Cog):
                     if await cursor.fetchone():
                         return False
 
-                platforms = ", ".join(p.get("name") for p in game.get("platforms", []))
-                await db.execute("""
+                platforms_field = game.get("platforms", [])
+                if isinstance(platforms_field, str):
+                    platforms = platforms_field
+                else:
+                    platforms = ", ".join(p.get("name") for p in platforms_field)
+
+                cover_url = game.get("cover", {}).get("url") or game.get("cover_url")
+
+                await db.execute(
+                    """
                     INSERT INTO wishlists (user_id, game_id, name, slug, cover_url, first_release_date, platforms, added_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    user_id,
-                    game_id,
-                    game.get("name", "Titre inconnu"),
-                    game.get("slug"),
-                    game.get("cover", {}).get("url"),
-                    game.get("first_release_date"),
-                    platforms,
-                    datetime.now().isoformat()
-                ))
+                    """,
+                    (
+                        user_id,
+                        game_id,
+                        game.get("name", "Titre inconnu"),
+                        game.get("slug"),
+                        cover_url,
+                        game.get("first_release_date"),
+                        platforms,
+                        datetime.now().isoformat(),
+                    ),
+                )
                 await db.commit()
                 return True
         except Exception as e:
@@ -79,6 +90,17 @@ class WishlistManager(commands.Cog):
             logger.error(f"Error removing game from wishlist: {e}")
             return False
 
+    async def clear_user_wishlist(self, user_id: int) -> bool:
+        """Remove all games from a user's wishlist."""
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM wishlists WHERE user_id = ?", (user_id,))
+                await db.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Error clearing wishlist: {e}")
+            return False
+
     async def is_in_wishlist(self, user_id: int, game_id: int) -> bool:
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT 1 FROM wishlists WHERE user_id = ? AND game_id = ?", (user_id, game_id)) as cursor:
@@ -89,7 +111,13 @@ class WishlistManager(commands.Cog):
             async with db.execute("SELECT * FROM wishlists WHERE user_id = ?", (user_id,)) as cursor:
                 rows = await cursor.fetchall()
                 columns = [column[0] for column in cursor.description]
-                return [dict(zip(columns, row)) for row in rows]
+                wishlist = []
+                for row in rows:
+                    game = dict(zip(columns, row))
+                    # Provide alias for compatibility with other views
+                    game["id"] = game.get("game_id")
+                    wishlist.append(game)
+                return wishlist
 
     def _format_date(self, timestamp: Optional[int]) -> str:
         if not timestamp:
@@ -192,6 +220,42 @@ class WishlistManager(commands.Cog):
             logger.error(f"Error clearing wishlist: {e}")
             await interaction.followup.send("❌ Une erreur s'est produite.")
 
+class ClearWishlistView(View):
+    """Confirmation view to clear the entire wishlist."""
+
+    def __init__(self, wishlist_manager: WishlistManager, user_id: int):
+        super().__init__(timeout=60)
+        self.wishlist_manager = wishlist_manager
+        self.user_id = user_id
+
+    @discord.ui.button(label="✅ Supprimer", style=discord.ButtonStyle.danger)
+    async def confirm_button(self, interaction: Interaction, button: Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "❌ Vous ne pouvez pas utiliser ce bouton.", ephemeral=True
+            )
+            return
+
+        success = await self.wishlist_manager.clear_user_wishlist(self.user_id)
+        if success:
+            await interaction.response.edit_message(
+                content="✅ Wishlist vidée !", embed=None, view=None
+            )
+        else:
+            await interaction.response.edit_message(
+                content="❌ Erreur lors de la suppression.", view=None
+            )
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction: Interaction, button: Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "❌ Vous ne pouvez pas utiliser ce bouton.", ephemeral=True
+            )
+            return
+        await interaction.response.edit_message(
+            content="Opération annulée.", embed=None, view=None
+        )
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(WishlistManager(bot))
