@@ -7,6 +7,7 @@ from discord.ext import commands
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from ui_components import GameEmbedView, EnhancedPaginatorView
+from discord.ui import View, Button
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,17 @@ class WishlistManager(commands.Cog):
                 return True
         except Exception as e:
             logger.error(f"Error removing game from wishlist: {e}")
+            return False
+
+    async def clear_user_wishlist(self, user_id: int) -> bool:
+        """Remove all games from a user's wishlist."""
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM wishlists WHERE user_id = ?", (user_id,))
+                await db.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Error clearing wishlist: {e}")
             return False
 
     async def is_in_wishlist(self, user_id: int, game_id: int) -> bool:
@@ -192,6 +204,42 @@ class WishlistManager(commands.Cog):
             logger.error(f"Error clearing wishlist: {e}")
             await interaction.followup.send("❌ Une erreur s'est produite.")
 
+class ClearWishlistView(View):
+    """Confirmation view to clear the entire wishlist."""
+
+    def __init__(self, wishlist_manager: WishlistManager, user_id: int):
+        super().__init__(timeout=60)
+        self.wishlist_manager = wishlist_manager
+        self.user_id = user_id
+
+    @discord.ui.button(label="✅ Supprimer", style=discord.ButtonStyle.danger)
+    async def confirm_button(self, interaction: Interaction, button: Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "❌ Vous ne pouvez pas utiliser ce bouton.", ephemeral=True
+            )
+            return
+
+        success = await self.wishlist_manager.clear_user_wishlist(self.user_id)
+        if success:
+            await interaction.response.edit_message(
+                content="✅ Wishlist vidée !", embed=None, view=None
+            )
+        else:
+            await interaction.response.edit_message(
+                content="❌ Erreur lors de la suppression.", view=None
+            )
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction: Interaction, button: Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "❌ Vous ne pouvez pas utiliser ce bouton.", ephemeral=True
+            )
+            return
+        await interaction.response.edit_message(
+            content="Opération annulée.", embed=None, view=None
+        )
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(WishlistManager(bot))
