@@ -146,6 +146,28 @@ class WishlistButton(discord.ui.Button):
             )
 
 
+    async def update_button_state(self, user_id: int) -> None:
+        """Update label and style to reflect wishlist membership"""
+        if not self.wishlist_manager:
+            return
+
+        game_id = self.game.get("id")
+        if not game_id:
+            return
+
+        try:
+            in_wishlist = await self.wishlist_manager.is_in_wishlist(user_id, game_id)
+        except Exception as e:
+            logger.error(f"Error updating wishlist button state: {e}")
+            return
+
+        if in_wishlist:
+            self.style = discord.ButtonStyle.success
+            self.label = "💖 Dans votre wishlist"
+        else:
+            self.style = discord.ButtonStyle.secondary
+            self.label = "💝 Wishlist"
+
 class PersonalWishlistView(discord.ui.View):
     """Personal view for wishlist actions - only visible to the user who clicked"""
     
