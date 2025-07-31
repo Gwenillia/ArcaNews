@@ -1,0 +1,7 @@
+discord.py
+pillow
+aiohttp
+python-dotenv
+readability-lxml
+beautifulsoup4
+aiosqlite
