@@ -101,7 +101,13 @@ class WishlistManager(commands.Cog):
             async with db.execute("SELECT * FROM wishlists WHERE user_id = ?", (user_id,)) as cursor:
                 rows = await cursor.fetchall()
                 columns = [column[0] for column in cursor.description]
-                return [dict(zip(columns, row)) for row in rows]
+                wishlist = []
+                for row in rows:
+                    game = dict(zip(columns, row))
+                    # Provide alias for compatibility with other views
+                    game["id"] = game.get("game_id")
+                    wishlist.append(game)
+                return wishlist
 
     def _format_date(self, timestamp: Optional[int]) -> str:
         if not timestamp:
