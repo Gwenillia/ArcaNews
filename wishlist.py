@@ -50,20 +50,30 @@ class WishlistManager(commands.Cog):
                     if await cursor.fetchone():
                         return False
 
-                platforms = ", ".join(p.get("name") for p in game.get("platforms", []))
-                await db.execute("""
+                platforms_field = game.get("platforms", [])
+                if isinstance(platforms_field, str):
+                    platforms = platforms_field
+                else:
+                    platforms = ", ".join(p.get("name") for p in platforms_field)
+
+                cover_url = game.get("cover", {}).get("url") or game.get("cover_url")
+
+                await db.execute(
+                    """
                     INSERT INTO wishlists (user_id, game_id, name, slug, cover_url, first_release_date, platforms, added_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    user_id,
-                    game_id,
-                    game.get("name", "Titre inconnu"),
-                    game.get("slug"),
-                    game.get("cover", {}).get("url"),
-                    game.get("first_release_date"),
-                    platforms,
-                    datetime.now().isoformat()
-                ))
+                    """,
+                    (
+                        user_id,
+                        game_id,
+                        game.get("name", "Titre inconnu"),
+                        game.get("slug"),
+                        cover_url,
+                        game.get("first_release_date"),
+                        platforms,
+                        datetime.now().isoformat(),
+                    ),
+                )
                 await db.commit()
                 return True
         except Exception as e:
