@@ -60,7 +60,15 @@ class BookmarkManager(commands.Cog):
             await db.execute("CREATE INDEX IF NOT EXISTS idx_bookmarks_entry ON bookmarks (entry_id)")
             await db.commit()
 
-    async def add_bookmark(self, user_id: int, entry_id: str, title: str, url: str, feed_title: Optional[str] = None, image_url: Optional[str] = None) -> bool:
+    async def add_bookmark(
+        self,
+        user_id: int,
+        entry_id: str,
+        title: str,
+        url: str,
+        feed_title: Optional[str] = None,
+        image_url: Optional[str] = None,
+    ) -> bool:
         try:
             async with aiosqlite.connect(DB_PATH) as db:
                 # Ensure a minimal news_entries row exists for this entry_id so we can later join and display full content
@@ -78,7 +86,6 @@ class BookmarkManager(commands.Cog):
                         ),
                     )
                 except Exception:
-                    # Non-fatal: proceed to store bookmark even if upsert fails
                     logger.debug("Could not ensure news_entries row for bookmark; proceeding")
 
                 await db.execute(
@@ -132,11 +139,7 @@ class BookmarkManager(commands.Cog):
             return []
 
     async def handle_bookmarks(self, interaction: Interaction):
-        """Handler called by the top-level /news bookmarks wrapper.
-
-        The bookmarks panel is always shown ephemerally to the invoking user.
-        """
-        # Always defer ephemerally so the panel and any followups are only visible to the user
+        """Handler called by the top-level /news favoris wrapper (always ephemeral)."""
         await interaction.response.defer(ephemeral=True)
         try:
             user_id = interaction.user.id
@@ -148,10 +151,9 @@ class BookmarkManager(commands.Cog):
 
             view = BookmarksListPanelView(bms, self)
             page_embed = view.build_page_embed(0)
-            # Send ephemeral so only the user interacts
             await interaction.followup.send(embed=page_embed, view=view, ephemeral=True)
         except Exception as e:
-            logger.error(f"Error in /news bookmarks: {e}")
+            logger.error(f"Error in /news favoris: {e}")
             try:
                 await interaction.followup.send("❌ Une erreur est survenue.", ephemeral=True)
             except Exception:
@@ -159,26 +161,18 @@ class BookmarkManager(commands.Cog):
 
     # --- UI helpers -------------------------------------------------
     def make_entry_view(self, entry: Dict[str, Any]) -> Optional[discord.ui.View]:
-        """Return a discord.ui.View for a posted entry (contains a Bookmark button).
-
-        This is safe to call at runtime; will return None if the bot isn't ready to handle interactions.
-        """
+        """Return a per-entry view (opens an ephemeral per-user manager on click)."""
         try:
-            view = EntryBookmarkView(entry, self)
-            return view
+            return EntryBookmarkView(entry, self)
         except Exception as e:
             logger.error(f"Error building bookmark view: {e}")
             return None
 
     @staticmethod
     def canonical_entry_id_from_entry(entry: Dict[str, Any]) -> str:
-        """Return the canonical entry_id used by the poster/db.
-
-        Matches the logic in miniflux.DiscordPoster: prefer miniflux:{id} else url:{url}
-        """
+        """Return the canonical entry_id used by the poster/db."""
         if not entry:
             return ""
-        # If we already have a canonical entry_id from the DB, prefer it
         if entry.get('entry_id'):
             return str(entry.get('entry_id'))
         if entry.get('id') is not None:
@@ -188,32 +182,35 @@ class BookmarkManager(commands.Cog):
         return ""
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Buttons / Views
+# ──────────────────────────────────────────────────────────────────────────────
+
 class EntryBookmarkButton(discord.ui.Button):
+    """Button placed on embeds the bot sends alongside news entries.
+    Clicking opens an ephemeral, per-user panel that shows either Add or Remove — never both.
+    """
     def __init__(self, entry: Dict[str, Any], manager: BookmarkManager):
-        super().__init__(label="🔖 Favori", style=discord.ButtonStyle.secondary)
+        super().__init__(label="🔖 Gérer mon favori", style=discord.ButtonStyle.secondary)
         self.entry = entry
         self.manager = manager
 
     async def callback(self, interaction: Interaction):
-        # Show a personal ephemeral view to add/remove bookmark
         user_id = interaction.user.id
-        # Use canonical id so it matches the persisted news_entries rows
         entry_id = self.manager.canonical_entry_id_from_entry(self.entry)
         title = self.entry.get('title') or self.entry.get('url') or 'Article'
-        url = self.entry.get('url') or ''
-
         try:
             is_bm = await self.manager.is_bookmarked(user_id, entry_id)
             pv = PersonalBookmarkView(self.entry, self.manager, user_id, is_bm)
-            if is_bm:
-                await interaction.response.send_message(f"🔖 **{title}** est déjà dans vos favoris.", view=pv, ephemeral=True)
-            else:
-                await interaction.response.send_message(f"🔖 **{title}** n'est pas dans vos favoris.", view=pv, ephemeral=True)
+            msg = f"🔖 **{title}** est déjà dans vos favoris." if is_bm else f"🔖 **{title}** n'est pas dans vos favoris."
+            await interaction.response.send_message(msg, view=pv, ephemeral=True)
         except Exception as e:
             logger.error(f"Error in EntryBookmarkButton callback: {e}")
-            await interaction.response.send_message("❌ Erreur lors de l'opération de bookmark.", ephemeral=True)
+            await interaction.response.send_message("❌ Erreur lors de l'opération de favoris.", ephemeral=True)
+
 
 class PersonalBookmarkView(discord.ui.View):
+    """Ephemeral per-user panel that shows only the relevant action for that user."""
     def __init__(self, entry: Dict[str, Any], manager: BookmarkManager, user_id: int, is_bookmarked: bool, timeout: Optional[float] = 60):
         super().__init__(timeout=timeout)
         self.entry = entry
@@ -229,7 +226,7 @@ class PersonalBookmarkView(discord.ui.View):
 
 class AddBookmarkButton(discord.ui.Button):
     def __init__(self, entry: Dict[str, Any], manager: BookmarkManager, user_id: int):
-        super().__init__(label="➕ Ajouter", style=discord.ButtonStyle.success)  # <- inside __init__
+        super().__init__(label="➕ Ajouter", style=discord.ButtonStyle.success)
         self.entry = entry
         self.manager = manager
         self.user_id = user_id
@@ -253,9 +250,11 @@ class AddBookmarkButton(discord.ui.Button):
                 image_url = first.get('url')
 
         try:
-            ok = await self.manager.add_bookmark(self.user_id, entry_id, title, url,
-                                                 (self.entry.get('feed') or {}).get('title') if isinstance(self.entry.get('feed'), dict) else None,
-                                                 image_url)
+            ok = await self.manager.add_bookmark(
+                self.user_id, entry_id, title, url,
+                (self.entry.get('feed') or {}).get('title') if isinstance(self.entry.get('feed'), dict) else None,
+                image_url
+            )
             if ok:
                 await interaction.response.edit_message(content=f"✅ **{title}** ajouté à vos favoris.", view=None)
             else:
@@ -264,9 +263,10 @@ class AddBookmarkButton(discord.ui.Button):
             logger.error(f"Error adding bookmark via button: {e}")
             await interaction.response.send_message("❌ Erreur interne.", ephemeral=True)
 
+
 class RemoveBookmarkButton(discord.ui.Button):
     def __init__(self, entry: Dict[str, Any], manager: BookmarkManager, user_id: int):
-        super().__init__(label="➖ Retirer", style=discord.ButtonStyle.danger)  # <- inside __init__
+        super().__init__(label="➖ Retirer", style=discord.ButtonStyle.danger)
         self.entry = entry
         self.manager = manager
         self.user_id = user_id
@@ -287,15 +287,56 @@ class RemoveBookmarkButton(discord.ui.Button):
             logger.error(f"Error removing bookmark via button: {e}")
             await interaction.response.send_message("❌ Erreur interne.", ephemeral=True)
 
+
 class EntryBookmarkView(discord.ui.View):
+    """Attached to any embed the bot posts itself. Clicking opens the per-user manager."""
     def __init__(self, entry: Dict[str, Any], manager: BookmarkManager):
         super().__init__(timeout=None)
-        # Keep a refernce to the entry for button callbacks
         self.entry = entry
         self.manager = manager
         self.add_item(EntryBookmarkButton(entry, manager))
 
 
+# ── Public view for channel posts ─────────────────────────────────────────────
+class PublicManageBookmarkButton(discord.ui.Button):
+    """Single public button that adapts per-user."""
+
+    def __init__(self, entry: Dict[str, Any], manager: BookmarkManager):
+        super().__init__(label="🔖 Favoris", style=discord.ButtonStyle.secondary)
+        self.entry = entry
+        self.manager = manager
+
+    async def callback(self, interaction: Interaction):
+        user_id = interaction.user.id
+        entry_id = self.manager.canonical_entry_id_from_entry(self.entry)
+        title = self.entry.get('title') or self.entry.get('url') or 'Article'
+
+        try:
+            is_bm = await self.manager.is_bookmarked(user_id, entry_id)
+            # Build per-user view with either Ajouter or Retirer
+            pv = PersonalBookmarkView(self.entry, self.manager, user_id, is_bm)
+
+            if is_bm:
+                msg = f"🔖 **{title}** est déjà dans vos favoris."
+            else:
+                msg = f"🔖 **{title}** n'est pas encore dans vos favoris."
+
+            await interaction.response.send_message(msg, view=pv, ephemeral=True)
+
+        except Exception as e:
+            logger.error(f"Error in PublicManageBookmarkButton callback: {e}")
+            await interaction.response.send_message("❌ Erreur interne.", ephemeral=True)
+
+
+class PublicBookmarkView(discord.ui.View):
+    """View for public channel messages. Always shows the neutral 'Favoris' button."""
+    def __init__(self, entry: Dict[str, Any], manager: BookmarkManager, timeout: Optional[float] = None):
+        super().__init__(timeout=timeout)
+        self.entry = entry
+        self.manager = manager
+        self.add_item(PublicManageBookmarkButton(entry, manager))
+
+# ── Bookmarks list panel (ephemeral) ─────────────────────────────────────────
 class BookmarksListPanelView(discord.ui.View):
     """Panel to list a user's bookmarks paginated, allow selecting one to display full news."""
     def __init__(self, bookmarks: List[Dict[str, Any]], manager: "BookmarkManager", page_size: int = 6):
@@ -304,7 +345,6 @@ class BookmarksListPanelView(discord.ui.View):
         self.page_size = max(1, page_size)
         self.current_page = 0
         self.max_page = max(0, (len(self.bookmarks) - 1) // self.page_size)
-        # store manager so we can build personal views (add/remove) for the invoking user
         self.manager = manager
         self._build_page_components()
 
@@ -329,7 +369,6 @@ class BookmarksListPanelView(discord.ui.View):
                 try:
                     sel = int(select.values[0])
                     bm = self.bookmarks[sel]
-                    # Build embed from news entry data
                     embed = discord.Embed(title=bm.get('title') or 'Article', color=0x2F3136)
                     if bm.get('summary'):
                         embed.description = bm.get('summary')
@@ -337,40 +376,22 @@ class BookmarksListPanelView(discord.ui.View):
                         embed.set_image(url=bm.get('image_url'))
                     if bm.get('url'):
                         embed.add_field(name='🔗 Lien', value=bm.get('url'), inline=False)
-                    # show full content if available
                     if bm.get('content'):
-                        # Truncate to Discord field limits
                         content = bm.get('content')
                         if len(content) > 4000:
                             content = content[:3997] + '...'
                         embed.add_field(name='📝 Contenu', value=content, inline=False)
 
-                    # If invoked in a guild channel, publish the article publicly to the channel,
-                    # and acknowledge the user's interaction ephemerally so only they see the confirmation.
-                    # Provide a personal ephemeral view so the invoking user can remove/add this bookmark
-                    try:
-                        user_id = interaction.user.id
-                        # bm comes from the DB join and already represents a bookmarked entry => is_bookmarked=True
-                        personal_view = PersonalBookmarkView(bm, self.manager, user_id, True)
+                    user_id = interaction.user.id
+                    personal_view = PersonalBookmarkView(bm, self.manager, user_id, True)  # selected from user's own list → True
 
-                        if interaction.guild_id and interaction.channel:
-                            # Send the article publicly to the channel and attach a persistent personal view
-                            try:
-                                public_view = PersonalBookmarkView(bm, self.manager, user_id, True, timeout=None)
-                                await interaction.channel.send(embed=embed, view=public_view)
-                                await interaction.response.send_message("✅ Article publié.", ephemeral=True)
-                            except Exception:
-                                # Fallback to sending ephemeral embed with the personal view
-                                await interaction.response.send_message(embed=embed, view=personal_view, ephemeral=True)
-                        else:
-                            # In DMs or unknown context, reply ephemerally with the embed + personal view
-                            await interaction.response.send_message(embed=embed, view=personal_view, ephemeral=True)
-                    except Exception as e:
-                        logger.error(f"Failed to publish bookmark publicly: {e}")
-                        try:
-                            await interaction.response.send_message("❌ Impossible de publier l'article.", ephemeral=True)
-                        except Exception:
-                            pass
+                    if interaction.guild_id and interaction.channel:
+                        # Post publicly with a single "manage" button (per-user ephemeral chooser)
+                        public_view = PublicBookmarkView(bm, self.manager, timeout=None)
+                        await interaction.channel.send(embed=embed, view=public_view)
+                        await interaction.response.send_message("✅ Article publié.", ephemeral=True)
+                    else:
+                        await interaction.response.send_message(embed=embed, view=personal_view, ephemeral=True)
                 except Exception as e:
                     logger.error(f"Error showing bookmark detail: {e}")
                     try:
@@ -394,20 +415,19 @@ class BookmarksListPanelView(discord.ui.View):
                         self.current_page -= 1
                         self._build_page_components()
                         await interaction.response.edit_message(embed=self.build_page_embed(self.current_page), view=self)
-
                 item.callback = _prev
+
             if isinstance(item, discord.ui.Button) and item.custom_id == 'next':
                 async def _next(interaction: Interaction, button=item):
                     if self.current_page < self.max_page:
                         self.current_page += 1
                         self._build_page_components()
                         await interaction.response.edit_message(embed=self.build_page_embed(self.current_page), view=self)
-
                 item.callback = _next
+
             if isinstance(item, discord.ui.Button) and item.custom_id == 'close':
                 async def _close(interaction: Interaction, button=item):
                     await interaction.response.edit_message(content='Panel fermé.', embed=None, view=None)
-
                 item.callback = _close
 
     def build_page_embed(self, page: int) -> discord.Embed:
@@ -429,13 +449,12 @@ class BookmarksListPanelView(discord.ui.View):
 async def setup(bot: commands.Bot):
     await bot.add_cog(BookmarkManager(bot))
 
-    # Register the /news group with bookmarks subcommand so users can run /news bookmarks
+    # Register the /news group with favoris subcommand
     try:
         bot.tree.remove_command("news")
     except Exception:
         pass
 
-    # Top-level wrapper that forwards to the cog
     async def _news_bookmarks(interaction: Interaction):
         cog: Optional["BookmarkManager"] = interaction.client.get_cog("BookmarkManager")
         if cog is None:
@@ -443,6 +462,6 @@ async def setup(bot: commands.Bot):
             return
         await cog.handle_bookmarks(interaction)
 
-    news_group = app_commands.Group(name="news", description="Commands liés aux news")
+    news_group = app_commands.Group(name="news", description="Commandes liées aux news")
     news_group.add_command(app_commands.Command(name="favoris", description="🔖 Affiche vos favoris (news)", callback=_news_bookmarks))
     bot.tree.add_command(news_group, override=True)

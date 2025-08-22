@@ -16,11 +16,11 @@ from miniflux import run_miniflux_loop
 # ──────────────────────────────────────────────────────────────────────────────
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+
 _dev_guild = os.getenv("DEV_GUILD_ID")
 DEV_GUILD_ID = int(_dev_guild) if _dev_guild else None  # Optional dev server for instant sync
 DEV_GUILD_OBJECT = discord.Object(id=DEV_GUILD_ID) if DEV_GUILD_ID else None
 
-# Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,17 @@ if _owner_env:
 else:
     OWNER_ID = None
 
-# Extensions to load/reload
+# Extensions to load/reload (must be importable: wishlist.py, igdb.py, search.py, bookmarks.py)
 EXTENSIONS: List[str] = ["wishlist", "igdb", "search", "bookmarks"]
+
+# Helper: safe decorator for dev-only commands (no-op when DEV_GUILD_ID is not set)
+def dev_guilds_decorator():
+    if DEV_GUILD_OBJECT:
+        return app_commands.guilds(DEV_GUILD_OBJECT)
+    # identity decorator when no dev guild is configured
+    def identity(f):
+        return f
+    return identity
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Bot subclass with deterministic syncing
@@ -44,28 +53,26 @@ EXTENSIONS: List[str] = ["wishlist", "igdb", "search", "bookmarks"]
 class ArcaBot(commands.Bot):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._synced_once = False
 
     async def setup_hook(self):
+        # 1) Load extensions first so all commands are registered
         for ext in EXTENSIONS:
             await self.load_extension(ext)
 
-        if self._synced_once:
-            return
-
         try:
+            # 2) If a dev guild is configured, overlay globals there for instant testing
             if DEV_GUILD_ID:
-                guild = discord.Object(id=DEV_GUILD_ID)
-                #self.tree.clear_commands(guild=guild)
-                #self.tree.copy_global_to(guild=guild)
-                synced = await self.tree.sync(guild=guild)
-                logger.info(f"✅ Synced {len(synced)} command(s) to dev guild {DEV_GUILD_ID}")
-            else:
-                synced = await self.tree.sync()
-                logger.info(f"✅ Synced {len(synced)} global command(s)")
-            self._synced_once = True
-        except Exception as e:
-            logger.exception(f"Failed to sync: {e}")
+                dev = discord.Object(id=DEV_GUILD_ID)
+                # Copy current global commands to dev guild and sync
+                self.tree.copy_global_to(guild=dev)
+                dev_synced = await self.tree.sync(guild=dev)
+                logger.info(f"✅ Dev overlay: {len(dev_synced)} command(s) in guild {DEV_GUILD_ID}")
+
+            # 3) Publish/refresh global commands (last)
+            global_synced = await self.tree.sync()
+            logger.info(f"✅ Global sync: {len(global_synced)} command(s) published")
+        except Exception:
+            logger.exception("setup_hook sync failed")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Instantiate bot
@@ -94,20 +101,18 @@ async def on_ready():
     asyncio.create_task(run_miniflux_loop(bot))
 
 # ──────────────────────────────────────────────────────────────────────────────
-# /sync (dev guild only)
+# /sync (dev guild only; safe, no destructive clear)
 # ──────────────────────────────────────────────────────────────────────────────
-@bot.tree.command(name="sync", description="Owner: sync or clear slash commands")
-@app_commands.guilds(DEV_GUILD_OBJECT)   # register only in dev guild
+@bot.tree.command(name="sync", description="Owner: sync commands")
+@dev_guilds_decorator()
 @is_owner()
-@app_commands.describe(scope="dev | global | clear_dev | clear_global")
+@app_commands.describe(scope="dev | global")
 async def sync_cmd(
     interaction: discord.Interaction,
-    scope: Literal["dev", "global", "clear_dev", "clear_global"] = "dev",
+    scope: Literal["dev", "global"] = "dev",
 ):
-    # Runtime safety: reject if invoked outside the dev guild when DEV_GUILD_ID is set
-    _dev = os.getenv("DEV_GUILD_ID")
-    _dev_id = int(_dev) if _dev else None
-    if _dev_id and interaction.guild_id != _dev_id:
+    # If a dev guild is configured, reject invocations outside it
+    if DEV_GUILD_ID and interaction.guild_id != DEV_GUILD_ID:
         await interaction.response.send_message(
             "\u274c Cette commande est r\u00e9serv\u00e9e au serveur de d\u00e9veloppement.", ephemeral=True
         )
@@ -118,69 +123,59 @@ async def sync_cmd(
         if scope == "dev":
             if not DEV_GUILD_ID:
                 return await interaction.followup.send("No DEV_GUILD_ID set.", ephemeral=True)
-            guild = discord.Object(id=DEV_GUILD_ID)
-            bot.tree.clear_commands(guild=guild)
-            bot.tree.copy_global_to(guild=guild)
-            synced = await bot.tree.sync(guild=guild)
-            return await interaction.followup.send(
-                f"Synced {len(synced)} command(s) to dev guild.", ephemeral=True
-            )
+            dev = discord.Object(id=DEV_GUILD_ID)
+            # mirror current globals into dev and sync
+            bot.tree.copy_global_to(guild=dev)
+            synced = await bot.tree.sync(guild=dev)
+            return await interaction.followup.send(f"✅ Synced {len(synced)} command(s) to dev guild.", ephemeral=True)
 
         if scope == "global":
             synced = await bot.tree.sync()
-            return await interaction.followup.send(
-                f"Synced {len(synced)} global command(s).", ephemeral=True
-            )
-
-        if scope == "clear_dev":
-            # Destructive operation: require administrator in the guild
-            if not interaction.user.guild_permissions.administrator:
-                return await interaction.followup.send(
-                    "\u274c Permission refus\u00e9e: administrateur requis.", ephemeral=True
-                )
-            if not DEV_GUILD_ID:
-                return await interaction.followup.send("Aucun DEV_GUILD_ID configur\u00e9.", ephemeral=True)
-            guild = discord.Object(id=DEV_GUILD_ID)
-            bot.tree.clear_commands(guild=guild)
-            await bot.tree.sync(guild=guild)
-            return await interaction.followup.send("\u2705 Toutes les commandes du serveur de d\u00e9veloppement ont \u00e9t\u00e9 effac\u00e9es.", ephemeral=True)
-
-        if scope == "clear_global":
-            # Destructive operation: require administrator in the guild
-            if not interaction.user.guild_permissions.administrator:
-                return await interaction.followup.send(
-                    "\u274c Permission refus\u00e9e: administrateur requis.", ephemeral=True
-                )
-            bot.tree.clear_commands(guild=None)
-            await bot.tree.sync()
-            return await interaction.followup.send("\u2705 Toutes les commandes globales ont \u00e9t\u00e9 effac\u00e9es.", ephemeral=True)
+            return await interaction.followup.send(f"✅ Synced {len(synced)} global command(s).", ephemeral=True)
 
     except Exception as e:
         logger.exception("Sync failed")
         await interaction.followup.send(f"Sync failed: {e}", ephemeral=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Aide / Help
+# /debug_commands (dev guild only)
+# ──────────────────────────────────────────────────────────────────────────────
+@bot.tree.command(name="debug_commands", description="Owner: list registered app commands")
+@dev_guilds_decorator()
+@is_owner()
+async def debug_commands(interaction: discord.Interaction):
+    if DEV_GUILD_ID and interaction.guild_id != DEV_GUILD_ID:
+        await interaction.response.send_message(
+            "\u274c Cette commande est r\u00e9serv\u00e9e au serveur de d\u00e9veloppement.", ephemeral=True
+        )
+        return
+
+    lines = []
+    try:
+        for cmd in bot.tree.walk_commands():
+            guild_ids = getattr(cmd, "_guild_ids", None)
+            scope = "GLOBAL" if not guild_ids else f"GUILDS: {list(guild_ids)}"
+            desc = getattr(cmd, "description", "") or "(no description)"
+            lines.append(f"/{cmd.qualified_name} — {scope} — {desc}")
+        text = "\n".join(lines) or "(none)"
+    except Exception as e:
+        text = f"(error collecting commands: {e})"
+
+    # send as code block to avoid embed limits
+    await interaction.response.send_message(f"```{text}```", ephemeral=True)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Aide / Help (global)
 # ──────────────────────────────────────────────────────────────────────────────
 @bot.tree.command(name="aide", description="Affiche l'aide et le statut du bot")
 @app_commands.describe(detail="Afficher la liste complète des commandes")
 async def aide_cmd(interaction: discord.Interaction, detail: bool = False):
-    """Send a compact, friendly help embed. If `detail` is True, include the full command list.
-
-    This replaces the previous plain-text help message with an embed that shows:
-    - short usage notes
-    - important wishlist commands
-    - bot status (latency, uptime)
-    - owner contact (when configured)
-    - optionally a full command list
-    """
-    # Basic usage text
+    """Compact help embed + status. Uses slash commands only (global)."""
     usage = (
         "Vous pouvez utiliser le bot dans un serveur ou en message privé (DM).\n"
         "Utilisez les commandes slash (préfixe /)."
     )
 
-    # Wishlist quick help
     wishlist_help = (
         "• `/wishlist show [@membre]` — Affiche votre wishlist; si vous passez un membre, affiche la sienne si elle est publique\n"
         "• `/wishlist visibility <public: bool>` — Définir la visibilité de votre wishlist (True = publique, False = privée)\n"
@@ -191,14 +186,12 @@ async def aide_cmd(interaction: discord.Interaction, detail: bool = False):
         "• `/recherche <nom_du_jeu> [platform_id]` — Rechercher un jeu par nom (optionnel: platform_id)"
     )
 
-    # Bookmarks / Favoris quick help
     bookmarks_help = (
         "• `/news favoris` — Affiche vos favoris (news)\n"
         "• Pour ajouter un favori : cliquez sur le bouton \"🔖 Favori\" sous une news publiée.\n"
         "• Vous pouvez consulter, parcourir et publier vos favoris depuis le panneau interactif."
     )
 
-    # Status
     uptime_seconds = int(time.time() - START_TIME)
     uptime = f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m {uptime_seconds % 60}s"
     latency_ms = int(bot.latency * 1000) if bot.latency else None
@@ -213,18 +206,18 @@ async def aide_cmd(interaction: discord.Interaction, detail: bool = False):
     embed.add_field(name="Statut", value=status_value, inline=False)
 
     if detail:
-        # Build a full list of registered commands
         try:
             cmds = []
             for cmd in bot.tree.walk_commands():
                 name = f"/{cmd.qualified_name}"
                 desc = getattr(cmd, "description", "") or "(pas de description)"
-                cmds.append(f"{name} — {desc}")
-            if cmds:
-                # join with newlines but keep embed field reasonably sized
-                embed.add_field(name="Liste complète des commandes", value="\n".join(cmds), inline=False)
-            else:
-                embed.add_field(name="Liste complète des commandes", value="(Aucune commande enregistrée)", inline=False)
+                scope = "GLOBAL" if not getattr(cmd, "_guild_ids", None) else "DEV"
+                cmds.append(f"{name} — {desc} [{scope}]")
+            embed.add_field(
+                name="Liste complète des commandes",
+                value="\n".join(cmds) if cmds else "(Aucune commande enregistrée)",
+                inline=False
+            )
         except Exception:
             embed.add_field(name="Liste complète des commandes", value="(Impossible de lister les commandes)", inline=False)
 
