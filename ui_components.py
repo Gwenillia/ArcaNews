@@ -1,5 +1,6 @@
 import discord
 from discord import Interaction
+from datetime import datetime
 from discord.ui import View, Button
 from typing import List, Dict, Any, Optional
 import logging
@@ -367,3 +368,240 @@ class UpcomingReleasesView(PaginatorView):
             await self.wishlist_button.update_button_state(interaction.user.id)
         
         await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+
+
+class GameSelectButton(discord.ui.Button):
+    """Button shown in a list panel to open the detailed view for a game."""
+
+    def __init__(self, index: int, label: str, parent_view: "WishlistListPanelView"):
+        # Use a compact label (Discord limits apply) and secondary style
+        super().__init__(label=label, style=discord.ButtonStyle.secondary)
+        self.index = index
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: Interaction):
+        # Only use the game data from the parent view
+        try:
+            games = getattr(self.parent_view, "games", [])
+            if not games or self.index < 0 or self.index >= len(games):
+                await interaction.response.send_message("❌ Jeu introuvable.", ephemeral=True)
+                return
+
+            game = games[self.index]
+
+            # Use the existing GameEmbedView to display details and wishlist actions
+            view = GameEmbedView(game, self.parent_view.wishlist_manager)
+
+            # Build embed similar to GameEmbedView's expectations (the view will render full details)
+            embed = discord.Embed(title=game.get("name", "Titre inconnu"), color=0xFF69B4)
+            # Show release date if available
+            fr_date = None
+            ts = game.get("first_release_date") or game.get("first_release_date")
+            if ts:
+                try:
+                    fr_date = datetime.fromtimestamp(int(ts)).strftime("%d %B %Y")
+                except Exception:
+                    fr_date = None
+
+            if fr_date:
+                embed.add_field(name="📅 Date de sortie", value=fr_date, inline=False)
+
+            # Link to IGDB when slug available
+            slug = game.get("slug") or game.get("slug")
+            if slug:
+                embed.add_field(name="🔗 Lien IGDB", value=f"[Voir sur IGDB](https://www.igdb.com/games/{slug})", inline=False)
+
+            cover_url = game.get("cover_url") or (game.get("cover", {}) or {}).get("url")
+            if cover_url:
+                if cover_url.startswith("//"):
+                    cover_url = f"https:{cover_url}"
+                cover_url = cover_url.replace("t_thumb", "t_cover_big")
+                embed.set_image(url=cover_url)
+
+            # Send ephemeral detailed view so the invoker gets the interactive wishlist buttons
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+        except Exception as e:
+            logger.error(f"Error opening game detail from list: {e}")
+            try:
+                await interaction.response.send_message("❌ Une erreur est survenue.", ephemeral=True)
+            except Exception:
+                pass
+
+
+class GameSelect(discord.ui.Select):
+    """Select menu for choosing a game from a page."""
+
+    def __init__(self, options: List[discord.SelectOption], parent_view: "WishlistListPanelView"):
+        super().__init__(placeholder="Choisir un jeu...", min_values=1, max_values=1, options=options)
+        self.parent_view = parent_view
+
+    async def callback(self, interaction: Interaction):
+        try:
+            # value is the absolute index in the games list
+            selected = int(self.values[0])
+            games = getattr(self.parent_view, "games", [])
+            if selected < 0 or selected >= len(games):
+                await interaction.response.send_message("❌ Jeu introuvable.", ephemeral=True)
+                return
+
+            game = games[selected]
+            view = GameEmbedView(game, self.parent_view.wishlist_manager)
+
+            embed = discord.Embed(title=game.get("name", "Titre inconnu"), color=0xFF69B4)
+            ts = game.get("first_release_date")
+            if ts:
+                try:
+                    date_str = datetime.fromtimestamp(int(ts)).strftime("%d %B %Y")
+                    embed.add_field(name="📅 Date de sortie", value=date_str, inline=False)
+                except Exception:
+                    pass
+
+            slug = game.get("slug")
+            if slug:
+                embed.add_field(name="🔗 Lien IGDB", value=f"[Voir sur IGDB](https://www.igdb.com/games/{slug})", inline=False)
+
+            cover_url = game.get("cover_url") or (game.get("cover", {}) or {}).get("url")
+            if cover_url:
+                if cover_url.startswith("//"):
+                    cover_url = f"https:{cover_url}"
+                cover_url = cover_url.replace("t_thumb", "t_cover_big")
+                embed.set_image(url=cover_url)
+
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error in GameSelect callback: {e}")
+            try:
+                await interaction.response.send_message("❌ Une erreur est survenue.", ephemeral=True)
+            except Exception:
+                pass
+
+
+class WishlistListPanelView(View):
+    """Panel view that shows a list of wishlist items paginated.
+
+    The view shows `page_size` game buttons per page plus Prev/Next/Close controls.
+    Clicking a game button opens the item's detailed ephemeral view.
+    """
+
+    def __init__(self, games: List[Dict[str, Any]], wishlist_manager, page_size: int = 10, owner_name: Optional[str] = None):
+        super().__init__(timeout=PAGINATION_TIMEOUT)
+        self.games = games
+        self.wishlist_manager = wishlist_manager
+        self.page_size = max(1, int(page_size))
+        self.current_page = 0
+        # Optional owner display name used when showing someone else's wishlist
+        self.owner_name = owner_name
+        # compute max page index
+        self.max_page = max(0, (len(self.games) - 1) // self.page_size)
+
+        # Initialize buttons for the first page and add navigational buttons (decorated methods exist below)
+        self._build_page_buttons()
+
+    def _build_page_buttons(self):
+        """(Re)build the GameSelectButtons for the current page and attach nav buttons."""
+        # Remove all items and re-add page-specific buttons + nav controls
+        self.clear_items()
+
+        start = self.current_page * self.page_size
+        end = start + self.page_size
+
+        # Build a single select menu for the page to reduce UI clutter
+        options = []
+        for i, game in enumerate(self.games[start:end], start=start):
+            name = game.get("name", "Jeu")
+            label = f"{i+1}. {name}"
+            if len(label) > 100:
+                label = label[:97] + "..."
+            # value will be the absolute index so callback can open the right game
+            options.append(discord.SelectOption(label=label, value=str(i)))
+
+        # Create and add the Select component (single-select)
+        if options:
+            select = GameSelect(options=options, parent_view=self)
+            self.add_item(select)
+
+        # Add the navigational buttons (these are bound to instance attributes by decorator)
+        # The decorated methods create self.previous_button, self.next_button and self.close_button
+        # Add them in a sensible order
+        try:
+            self.add_item(self.previous_button)
+            self.add_item(self.next_button)
+            self.add_item(self.close_button)
+        except Exception:
+            # If for some reason decorated buttons aren't present, it's non-fatal
+            pass
+
+        # Update nav button disabled state
+        if hasattr(self, 'previous_button'):
+            self.previous_button.disabled = self.current_page == 0
+        if hasattr(self, 'next_button'):
+            self.next_button.disabled = self.current_page == self.max_page
+
+    def build_page_embed(self, page: int) -> discord.Embed:
+        """Return an embed representing the given page of games."""
+        page = max(0, min(page, self.max_page))
+        start = page * self.page_size
+        end = start + self.page_size
+        page_games = self.games[start:end]
+
+        description_lines = []
+        now_ts = int(datetime.now().timestamp())
+        for idx, game in enumerate(page_games, start=start):
+            name = game.get("name", "Titre inconnu")
+            ts = game.get("first_release_date")
+            if ts:
+                try:
+                    rel = "(à venir)" if int(ts) >= now_ts else "(déjà sorti)"
+                    date_str = datetime.fromtimestamp(int(ts)).strftime("%d/%m/%Y")
+                except Exception:
+                    date_str = "Date inconnue"
+                    rel = ""
+            else:
+                date_str = "Date inconnue"
+                rel = ""
+
+            slug = game.get("slug")
+            if slug:
+                link = f"https://www.igdb.com/games/{slug}"
+                line = f"**{idx+1}. [{name}]({link})** — {date_str} {rel}"
+            else:
+                line = f"**{idx+1}. {name}** — {date_str} {rel}"
+
+            description_lines.append(line)
+
+        if self.owner_name:
+            title = f"💝 Wishlist de {self.owner_name} (page {page+1}/{self.max_page+1})"
+        else:
+            title = f"💝 Votre Wishlist (page {page+1}/{self.max_page+1})"
+
+        embed = discord.Embed(
+            title=title,
+            description="\n".join(description_lines) if description_lines else "(Aucun jeu sur cette page)",
+            color=0xFF69B4,
+        )
+
+        if len(self.games) > self.page_size:
+            embed.set_footer(text=f"Affichage {start+1}-{min(end, len(self.games))} sur {len(self.games)} jeux")
+
+        return embed
+
+    @discord.ui.button(label="◀️ Précédent", style=discord.ButtonStyle.secondary)
+    async def previous_button(self, interaction: Interaction, button: Button):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self._build_page_buttons()
+            embed = self.build_page_embed(self.current_page)
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Suivant ▶️", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: Interaction, button: Button):
+        if self.current_page < self.max_page:
+            self.current_page += 1
+            self._build_page_buttons()
+            embed = self.build_page_embed(self.current_page)
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="🗑️ Fermer", style=discord.ButtonStyle.danger)
+    async def close_button(self, interaction: Interaction, button: Button):
+        await interaction.response.edit_message(content="Panel fermé.", embed=None, view=None)
