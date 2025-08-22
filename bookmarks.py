@@ -145,7 +145,7 @@ class BookmarkManager(commands.Cog):
             user_id = interaction.user.id
             bms = await self.get_user_bookmarks(user_id)
             if not bms:
-                embed = discord.Embed(title="🔖 Vos favoris", description="Vous n'avez aucun favori.", color=0x2F3136)
+                embed = discord.Embed(title="🔖 Vos favoris", description="Vous n'avez aucun favoris.", color=0x2F3136)
                 await interaction.followup.send(embed=embed, ephemeral=True)
                 return
 
@@ -191,7 +191,7 @@ class EntryBookmarkButton(discord.ui.Button):
     Clicking opens an ephemeral, per-user panel that shows either Add or Remove — never both.
     """
     def __init__(self, entry: Dict[str, Any], manager: BookmarkManager):
-        super().__init__(label="🔖 Gérer mon favori", style=discord.ButtonStyle.secondary)
+        super().__init__(label="🔖 Gérer mon favoris", style=discord.ButtonStyle.secondary)
         self.entry = entry
         self.manager = manager
 

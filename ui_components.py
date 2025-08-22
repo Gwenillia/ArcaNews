@@ -486,7 +486,9 @@ class WishlistListPanelView(View):
 
     def __init__(self, games: List[Dict[str, Any]], wishlist_manager, page_size: int = 10, owner_name: Optional[str] = None):
         super().__init__(timeout=PAGINATION_TIMEOUT)
-        self.games = games
+        # Keep an original copy so we can re-sort on demand without losing the source order
+        self.original_games = list(games)
+        self.games = list(games)
         self.wishlist_manager = wishlist_manager
         self.page_size = max(1, int(page_size))
         self.current_page = 0
@@ -495,13 +497,35 @@ class WishlistListPanelView(View):
         # compute max page index
         self.max_page = max(0, (len(self.games) - 1) // self.page_size)
 
+        # Default sort direction: True == descending (most recent/unknown first) to match previous behaviour
+        self.sort_descending = True
+
         # Initialize buttons for the first page and add navigational buttons (decorated methods exist below)
         self._build_page_buttons()
+
+    def _release_ts(self, g: Dict[str, Any]) -> int:
+        """Normalize release timestamp for sorting.
+
+        Missing or invalid dates return a large sentinel so they sort consistently.
+        """
+        ts = g.get("first_release_date")
+        try:
+            return int(ts) if ts else 9999999999
+        except Exception:
+            return 9999999999
+
+    def _sort_games(self) -> None:
+        """Sort self.games from the original list according to current sort direction."""
+        self.games = sorted(self.original_games, key=self._release_ts, reverse=bool(self.sort_descending))
+        self.max_page = max(0, (len(self.games) - 1) // self.page_size)
 
     def _build_page_buttons(self):
         """(Re)build the GameSelectButtons for the current page and attach nav buttons."""
         # Remove all items and re-add page-specific buttons + nav controls
         self.clear_items()
+
+        # Ensure games are sorted according to current toggle before building page
+        self._sort_games()
 
         start = self.current_page * self.page_size
         end = start + self.page_size
@@ -521,10 +545,16 @@ class WishlistListPanelView(View):
             select = GameSelect(options=options, parent_view=self)
             self.add_item(select)
 
-        # Add the navigational buttons (these are bound to instance attributes by decorator)
-        # The decorated methods create self.previous_button, self.next_button and self.close_button
-        # Add them in a sensible order
+        # Add the sort toggle button and navigational buttons (these are bound to instance attributes by decorator)
+        # Make sure the sort button label matches current state
         try:
+            self.sort_button.label = "Trier: Décroissant" if self.sort_descending else "Trier: Croissant"
+        except Exception:
+            pass
+
+        try:
+            # decorated buttons are attributes on the instance
+            self.add_item(self.sort_button)
             self.add_item(self.previous_button)
             self.add_item(self.next_button)
             self.add_item(self.close_button)
@@ -537,6 +567,7 @@ class WishlistListPanelView(View):
             self.previous_button.disabled = self.current_page == 0
         if hasattr(self, 'next_button'):
             self.next_button.disabled = self.current_page == self.max_page
+    # end _build_page_buttons
 
     def build_page_embed(self, page: int) -> discord.Embed:
         """Return an embed representing the given page of games."""
@@ -601,6 +632,18 @@ class WishlistListPanelView(View):
             self._build_page_buttons()
             embed = self.build_page_embed(self.current_page)
             await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Trier: Décroissant", style=discord.ButtonStyle.primary)
+    async def sort_button(self, interaction: Interaction, button: Button):
+        """Toggle sort order between descending and ascending by release date."""
+        # Only toggle and rebuild; preserve current page index where reasonable
+        self.sort_descending = not bool(self.sort_descending)
+        # Update label to reflect new state
+        button.label = "Trier: Décroissant" if self.sort_descending else "Trier: Croissant"
+        # Rebuild page buttons which will re-sort and refresh navigation
+        self._build_page_buttons()
+        embed = self.build_page_embed(self.current_page)
+        await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="🗑️ Fermer", style=discord.ButtonStyle.danger)
     async def close_button(self, interaction: Interaction, button: Button):
