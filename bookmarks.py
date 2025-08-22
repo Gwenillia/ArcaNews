@@ -191,7 +191,7 @@ class EntryBookmarkButton(discord.ui.Button):
     Clicking opens an ephemeral, per-user panel that shows either Add or Remove — never both.
     """
     def __init__(self, entry: Dict[str, Any], manager: BookmarkManager):
-        super().__init__(label="🔖 Gérer mon favoris", style=discord.ButtonStyle.secondary)
+        super().__init__(label="🔖 Favoris", style=discord.ButtonStyle.secondary)
         self.entry = entry
         self.manager = manager
 
