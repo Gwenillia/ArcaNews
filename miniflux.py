@@ -469,7 +469,85 @@ class DiscordPoster:
         
         try:
             embed = await ContentProcessor.process_entry(entry)
-            await channel.send(embed=embed)
+            # Persist canonical entry in data/news.db so bookmarks can later reference full content
+            try:
+                # Derive an entry_id: prefer Miniflux id if present, else use URL
+                entry_id = None
+                if entry.get('id'):
+                    entry_id = f"miniflux:{entry.get('id')}"
+                else:
+                    entry_id = f"url:{entry.get('url') or entry.get('guid') or ''}"
+
+                # Extract fields from processed embed and raw entry
+                title = embed.title or entry.get('title') or ''
+                url = embed.url or entry.get('url') or ''
+                summary = embed.description or None
+                # We don't have embed.content separate; use summary for now. If you later want full HTML, adapt ContentProcessor to return it.
+                image_url = None
+                try:
+                    if embed.image and embed.image.url:
+                        image_url = embed.image.url
+                except Exception:
+                    image_url = None
+
+                published_at = None
+                try:
+                    # Miniflux may provide published_at as an ISO string or numeric timestamp
+                    pa = entry.get('published_at') or entry.get('published') or None
+                    if isinstance(pa, (int, float)):
+                        published_at = int(pa)
+                    elif isinstance(pa, str):
+                        # try ISO parse to timestamp
+                        from datetime import datetime as _dt
+                        try:
+                            dt = _dt.fromisoformat(pa)
+                            published_at = int(dt.timestamp())
+                        except Exception:
+                            published_at = None
+                except Exception:
+                    published_at = None
+
+                # Upsert into news.db
+                import aiosqlite
+                db_path = "data/news.db"
+                try:
+                    async with aiosqlite.connect(db_path) as db:
+                        await db.execute(
+                            "INSERT OR REPLACE INTO news_entries (entry_id, source, source_entry_id, url, title, summary, content, image_url, published_at, posted_at, extra_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                str(entry_id),
+                                'miniflux',
+                                str(entry.get('id')) if entry.get('id') is not None else None,
+                                url,
+                                title,
+                                summary,
+                                None,
+                                image_url,
+                                published_at,
+                                __import__('datetime').datetime.now().isoformat(),
+                                None,
+                            ),
+                        )
+                        await db.commit()
+                except Exception:
+                    logger.debug("Failed to persist news entry to data/news.db")
+            except Exception as e:
+                logger.debug(f"Error preparing news DB upsert: {e}")
+
+            # Try to attach a per-user bookmark button view if BookmarkManager is available
+            bookmark_cog = self.bot.get_cog('BookmarkManager')
+            view = None
+            try:
+                if bookmark_cog:
+                    # Pass the raw entry dict so the view can extract id/title/url
+                    view = bookmark_cog.make_entry_view(entry)
+            except Exception:
+                logger.debug("Bookmark view not available")
+
+            if view:
+                await channel.send(embed=embed, view=view)
+            else:
+                await channel.send(embed=embed)
             
             logger.info(f"Posted article: {entry.get('title', 'Untitled')}")
             return True

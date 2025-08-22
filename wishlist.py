@@ -507,15 +507,21 @@ class WishlistManager(commands.Cog):
         return output_path
 
     async def handle_show(self, interaction: Interaction, member: Optional[discord.Member] = None):
-        await interaction.response.defer()
         try:
             target = member or interaction.user
 
-            if target.id != interaction.user.id:
-                visible = await self.get_user_visibility(target.id)
-                if not visible:
-                    await interaction.followup.send("❌ Cette wishlist est privée.", ephemeral=True)
-                    return
+            # Check visibility BEFORE deferring so we can deny privately without creating a public "thinking" message
+            real_visible = await self.get_user_visibility(target.id)
+            if target.id != interaction.user.id and not real_visible:
+                # Another user trying to see a private wishlist -> deny (ephemeral)
+                await interaction.response.send_message("❌ Cette wishlist est privée.", ephemeral=True)
+                return
+
+            # Determine ephemeral behavior for the owner BEFORE deferring
+            ephemeral_for_owner = (target.id == interaction.user.id and not real_visible)
+
+            # Defer with the appropriate visibility (ephemeral when owner views their private wishlist)
+            await interaction.response.defer(ephemeral=ephemeral_for_owner)
 
             user_wishlist = await self.get_user_wishlist(target.id)
             if not user_wishlist:
@@ -526,7 +532,9 @@ class WishlistManager(commands.Cog):
                     description=desc,
                     color=0xFF69B4
                 )
-                await interaction.followup.send(embed=embed)
+                # If the wishlist belongs to a user who has visibility off but is viewing their own wishlist, keep the response ephemeral
+                ephemeral_for_owner = (target.id == interaction.user.id and not real_visible)
+                await interaction.followup.send(embed=embed, ephemeral=ephemeral_for_owner)
                 return
 
             def _release_ts(g):
@@ -578,7 +586,8 @@ class WishlistManager(commands.Cog):
             owner_name = target.display_name if target.id != interaction.user.id else None
             view = WishlistListPanelView(sorted_wishlist, self, page_size=10, owner_name=owner_name)
             page_embed = view.build_page_embed(0)
-            await interaction.followup.send(embed=page_embed, view=view)
+            # Send the paginated wishlist. followup will respect the ephemeral flag matching the initial defer.
+            await interaction.followup.send(embed=page_embed, view=view, ephemeral=ephemeral_for_owner)
 
         except Exception as e:
             logger.error(f"Error displaying wishlist: {e}")

@@ -36,7 +36,7 @@ else:
     OWNER_ID = None
 
 # Extensions to load/reload
-EXTENSIONS: List[str] = ["wishlist", "igdb", "search"]
+EXTENSIONS: List[str] = ["wishlist", "igdb", "search", "bookmarks"]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Bot subclass with deterministic syncing
@@ -191,6 +191,13 @@ async def aide_cmd(interaction: discord.Interaction, detail: bool = False):
         "• `/recherche <nom_du_jeu> [platform_id]` — Rechercher un jeu par nom (optionnel: platform_id)"
     )
 
+    # Bookmarks / Favoris quick help
+    bookmarks_help = (
+        "• `/news favoris` — Affiche vos favoris (news)\n"
+        "• Pour ajouter un favori : cliquez sur le bouton \"🔖 Favori\" sous une news publiée.\n"
+        "• Vous pouvez consulter, parcourir et publier vos favoris depuis le panneau interactif."
+    )
+
     # Status
     uptime_seconds = int(time.time() - START_TIME)
     uptime = f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m {uptime_seconds % 60}s"
@@ -199,6 +206,7 @@ async def aide_cmd(interaction: discord.Interaction, detail: bool = False):
     embed = discord.Embed(title="Aide — ArcaNews", color=0x2F3136)
     embed.description = usage
     embed.add_field(name="Commandes principales (wishlist)", value=wishlist_help, inline=False)
+    embed.add_field(name="Favoris (news)", value=bookmarks_help, inline=False)
     status_value = f"Latency: {latency_ms} ms\nUptime: {uptime}"
     if OWNER_ID:
         status_value += f"\nOwner: <@{OWNER_ID}>"
