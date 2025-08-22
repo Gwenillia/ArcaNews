@@ -30,7 +30,7 @@ PLATFORMS = [
     {"id": 130, "name": "Nintendo Switch"},
     {"id": 167, "name": "PlayStation 5"},
     {"id": 169, "name": "Xbox Series X"},
-    {"id": 184, "name": "Nintendo Switch 2"},
+    {"id": 508, "name": "Nintendo Switch 2"},
 ]
 
 class IGDBError(Exception):
@@ -138,7 +138,32 @@ class IGDB(commands.Cog):
                     logger.error(f"IGDB API error {resp.status}: {error_text}")
                     raise IGDBError(f"API request failed: {resp.status}")
                 
-                return await resp.json()
+                data = await resp.json()
+
+                # Normalize returned game objects so callers can reliably use
+                # top-level keys like `first_release_date` and `cover_url`.
+                try:
+                    for g in data:
+                        # cover_url: prefer top-level cover_url, fall back to nested cover.url
+                        cover = g.get("cover") or {}
+                        if isinstance(cover, dict):
+                            g.setdefault("cover_url", cover.get("url"))
+
+                        # first_release_date: prefer explicit field, otherwise derive
+                        # from release_dates (use earliest date)
+                        if not g.get("first_release_date"):
+                            rds = g.get("release_dates") or []
+                            dates = [rd.get("date") for rd in rds if rd and rd.get("date")]
+                            if dates:
+                                try:
+                                    g["first_release_date"] = min(dates)
+                                except Exception:
+                                    pass
+                except Exception:
+                    # Normalization should not fail the whole request; log at debug level
+                    logger.debug("Failed to normalize IGDB response", exc_info=True)
+
+                return data
                 
         except aiohttp.ClientError as e:
             raise IGDBError(f"Network error: {e}")
